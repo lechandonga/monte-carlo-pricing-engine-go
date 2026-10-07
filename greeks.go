@@ -67,6 +67,22 @@ func (e *Engine) Greeks(opt Option, cfg Config) (Greeks, error) {
 	if tDn.Maturity <= 0 {
 		tDn.Maturity = opt.Maturity / 2
 	}
+	// Rescale any explicit calendar so it stays valid under the
+	// maturity bump (must still end exactly at maturity).
+	rescale := func(o *Option, m float64) {
+		if len(o.ObservationDates) == 0 {
+			return
+		}
+		dates := make([]float64, len(o.ObservationDates))
+		f := m / opt.Maturity
+		for i, d := range o.ObservationDates {
+			dates[i] = d * f
+		}
+		dates[len(dates)-1] = m
+		o.ObservationDates = dates
+	}
+	rescale(&tUp, tUp.Maturity)
+	rescale(&tDn, tDn.Maturity)
 	pTUp, err := price(tUp)
 	if err != nil {
 		return Greeks{}, err

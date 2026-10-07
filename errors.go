@@ -24,6 +24,9 @@ const (
 	// ErrNonFinite indicates a non-finite value (NaN/Inf) appeared
 	// during simulation, so no number is returned.
 	ErrNonFinite
+	// ErrCanceled indicates the run (or the batch containing it) was
+	// canceled via context before a result was available.
+	ErrCanceled
 )
 
 func (k ErrKind) String() string {
@@ -36,6 +39,8 @@ func (k ErrKind) String() string {
 		return "not converged"
 	case ErrNonFinite:
 		return "non-finite result"
+	case ErrCanceled:
+		return "canceled"
 	default:
 		return "unknown error"
 	}

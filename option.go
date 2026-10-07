@@ -15,6 +15,8 @@ const (
 	Asian
 	// Barrier is a single-barrier knock-in / knock-out option.
 	Barrier
+	// Lookback is a lookback option with floating or fixed strike.
+	Lookback
 )
 
 func (t OptionType) String() string {
@@ -25,6 +27,8 @@ func (t OptionType) String() string {
 		return "asian"
 	case Barrier:
 		return "barrier"
+	case Lookback:
+		return "lookback"
 	default:
 		return "unknown"
 	}
@@ -88,6 +92,30 @@ type BarrierSpec struct {
 	Monitoring Monitoring
 }
 
+// LookbackKind selects floating- or fixed-strike lookback semantics.
+type LookbackKind int
+
+const (
+	// FloatingStrike lookback: payoff S_T - min S (call) or max S - S_T (put).
+	FloatingStrike LookbackKind = iota
+	// FixedStrike lookback: payoff max S - K (call) or K - min S (put).
+	FixedStrike
+)
+
+func (k LookbackKind) String() string {
+	if k == FloatingStrike {
+		return "floating-strike"
+	}
+	return "fixed-strike"
+}
+
+// LookbackSpec groups lookback-only fields. Extremum accumulation
+// always starts from Spot at time 0.
+type LookbackSpec struct {
+	Kind       LookbackKind
+	Monitoring Monitoring
+}
+
 // Option is a complete, self-contained pricing request.
 type Option struct {
 	Type     OptionType
@@ -100,6 +128,51 @@ type Option struct {
 	Vol      float64 // sigma, must be >= 0
 	// Barrier is only used when Type == Barrier.
 	Barrier BarrierSpec
+	// Lookback is only used when Type == Lookback.
+	Lookback LookbackSpec
+	// ObservationDates is the strictly increasing observation
+	// calendar in years. It is used by Asian fixings, discrete
+	// barrier monitoring and discrete lookback extremum updates. The
+	// calendar must lie in [0, Maturity], be strictly increasing and
+	// end exactly at Maturity; it is never silently sorted,
+	// de-duplicated or rounded. Nil selects the legacy equally spaced
+	// calendar (0..T for Asian, dt..T for barrier/lookback). Ignored
+	// by European and by continuously monitored products, where the
+	// simulation grid only affects numerical accuracy.
+	ObservationDates []float64
+}
+
+// ValidateCalendar checks an observation calendar against maturity.
+// Every failure class gets its own message: empty, non-finite, out of
+// range, duplicate or out of order.
+func ValidateCalendar(dates []float64, maturity float64) error {
+	if len(dates) == 0 {
+		return invalidf("observation calendar must contain at least one date")
+	}
+	prev := 0.0
+	for i, d := range dates {
+		if math.IsNaN(d) || math.IsInf(d, 0) {
+			return invalidf("observation date #%d is not finite: %v", i, d)
+		}
+		if d < 0 {
+			return invalidf("observation date #%d (%v) is before time 0", i, d)
+		}
+		if d > maturity {
+			return invalidf("observation date #%d (%v) is after maturity (%v)", i, d, maturity)
+		}
+		if i > 0 && d <= prev {
+			if d == prev {
+				return invalidf("observation date #%d (%v) duplicates date #%d", i, d, i-1)
+			}
+			return invalidf("observation date #%d (%v) is not strictly increasing (previous %v)", i, d, prev)
+		}
+		prev = d
+	}
+	if dates[len(dates)-1] != maturity {
+		return invalidf("observation calendar must end at maturity (%v), last date is %v",
+			maturity, dates[len(dates)-1])
+	}
+	return nil
 }
 
 // Validate enforces all parameter constraints. It returns an *Error
@@ -129,13 +202,37 @@ func (o *Option) Validate() error {
 	if o.Vol < 0 {
 		return invalidf("Vol must be >= 0, got %v", o.Vol)
 	}
-	if o.Type != European && o.Type != Asian && o.Type != Barrier {
+	if o.Type != European && o.Type != Asian && o.Type != Barrier && o.Type != Lookback {
 		return invalidf("unknown option type %d", int(o.Type))
 	}
 	if o.Type == Barrier {
 		if err := o.validateBarrier(); err != nil {
 			return err
 		}
+	}
+	if o.Type == Lookback {
+		if err := o.validateLookback(); err != nil {
+			return err
+		}
+	}
+	if o.ObservationDates != nil && o.Type != European {
+		if len(o.ObservationDates) == 0 {
+			return invalidf("observation calendar must contain at least one date")
+		}
+		if err := ValidateCalendar(o.ObservationDates, o.Maturity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (o *Option) validateLookback() error {
+	l := o.Lookback
+	if l.Kind != FloatingStrike && l.Kind != FixedStrike {
+		return invalidf("unknown lookback kind %d", int(l.Kind))
+	}
+	if l.Monitoring != MonitorDiscrete && l.Monitoring != MonitorContinuous {
+		return invalidf("unknown monitoring %d", int(l.Monitoring))
 	}
 	return nil
 }

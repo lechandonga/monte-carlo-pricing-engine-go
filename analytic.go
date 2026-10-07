@@ -81,3 +81,103 @@ func BlackScholes(payoff Payoff, s, k, t, r, q, sigma float64) float64 {
 	}
 	return k*math.Exp(-r*t)*normCDF(-d2) - s*math.Exp(-q*t)*normCDF(-d1)
 }
+
+// ContinuousBarrier prices a continuously monitored single-barrier
+// option with zero rebate using the Reiner-Rubinstein (Haug) closed
+// form. It is the theoretical target of the Brownian-bridge Monte
+// Carlo under MonitorContinuous.
+func ContinuousBarrier(payoff Payoff, dir BarrierDirection, kind BarrierKind,
+	s, k, h, t, r, q, sigma float64) float64 {
+
+	mu := (r - q - 0.5*sigma*sigma) / (sigma * sigma)
+	sqrtT := sigma * math.Sqrt(t)
+	x1 := math.Log(s/k)/sqrtT + (1+mu)*sqrtT
+	x2 := math.Log(s/h)/sqrtT + (1+mu)*sqrtT
+	y1 := math.Log(h*h/(s*k))/sqrtT + (1+mu)*sqrtT
+	y2 := math.Log(h/s)/sqrtT + (1+mu)*sqrtT
+
+	phi := 1.0
+	if payoff == Put {
+		phi = -1
+	}
+	sv := s * math.Exp(-q*t)
+	kv := k * math.Exp(-r*t)
+	l := math.Pow(h/s, 2*mu)
+	lp := math.Pow(h/s, 2*(mu+1))
+
+	// Reiner-Rubinstein A/B (ordinary) and C/D (image) terms.
+	plain := func(x float64) float64 {
+		return phi*sv*normCDF(phi*x) - phi*kv*normCDF(phi*(x-sqrtT))
+	}
+	image := func(x float64) float64 {
+		return phi*sv*lp*normCDF(phi*x) - phi*kv*l*normCDF(phi*(x-sqrtT))
+	}
+	A, B := plain(x1), plain(x2)
+	C, D := image(y1), image(y2)
+
+	var out float64
+	switch {
+	case dir == Down && payoff == Call && k > h: // CDO K>H
+		out = A - C
+	case dir == Down && payoff == Call:
+		out = B - D
+	case dir == Up && payoff == Call && k > h:
+		out = 0
+	case dir == Up && payoff == Call:
+		out = A - B + D - C
+	case dir == Down && payoff == Put && k < h:
+		out = 0
+	case dir == Up && payoff == Put && k > h: // UOP K>H
+		out = B - D
+	case dir == Down && payoff == Put: // DOP K>H
+		out = A - B + D - C
+	default:
+		out = A - C
+	}
+	if kind == KnockOut {
+		return out
+	}
+	return BlackScholes(payoff, s, k, t, r, q, sigma) - out
+}
+
+// ContinuousFloatingLookback prices a continuously monitored
+// floating-strike lookback (Goldman-Sosin-Gatto / Haug). The minimum
+// (call) and maximum (put) accumulate from S0 at time 0.
+func ContinuousFloatingLookback(payoff Payoff, s, t, r, q, sigma float64) float64 {
+	if sigma == 0 {
+		// Deterministic GBM: min/max are endpoints, payoff is
+		// |exp((r-q)t)-1| discounted appropriately.
+		fwd := s * math.Exp((r-q)*t)
+		if payoff == Call {
+			return math.Exp(-r*t) * (fwd - s)
+		}
+		return math.Exp(-r*t) * (s - fwd)
+	}
+	sqrtT := sigma * math.Sqrt(t)
+	a1 := normCDF((r - q + 0.5*sigma*sigma) * t / sqrtT)
+	a2 := normCDF((r - q - 0.5*sigma*sigma) * t / sqrtT)
+	fwd := s * math.Exp(-q*t)
+	if payoff == Call {
+		// Floating call = S e^{-qT} - e^{-rT} E[min]. With
+		// mu = r-q-sigma^2/2, b = mu/sigma^2 and A = mu sqrt(T)/sigma:
+		//   I1 = N(A) + e^{(r-q)T}(1-N(A+v))
+		//   I2 = sigma^2/(2(r-q)) (N(A) - e^{(r-q)T}(1-N(A+v)))
+		//   E[min] = S (I1 - I2)
+		// The r==q case is the common removable singularity.
+		if r == q {
+			return s * sigma * math.Sqrt(2*t/math.Pi)
+		}
+		i1 := a2 + math.Exp((r-q)*t)*(1-a1)
+		i2 := sigma * sigma / (2 * (r - q)) * (a2 - math.Exp((r-q)*t)*(1-a1))
+		return fwd - math.Exp(-r*t)*s*(i1-i2)
+	}
+	// Floating put = e^{-rT} E[max] - S e^{-qT}, where
+	//   E[max] = S [I3 + sigma^2/(2(r-q))(e^{(r-q)T} N(A+v) - (1-N(A)))]
+	//   I3 = 1-N(A) + e^{(r-q)T} N(A+v)
+	if r == q {
+		return s * sigma * math.Sqrt(2*t/math.Pi)
+	}
+	i3 := 1 - a2 + math.Exp((r-q)*t)*a1
+	i4 := sigma * sigma / (2 * (r - q)) * (math.Exp((r-q)*t)*a1 - (1 - a2))
+	return math.Exp(-r*t)*s*(i3+i4) - fwd
+}
